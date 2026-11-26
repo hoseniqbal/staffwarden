@@ -14,6 +14,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class StaffWarden_Features {
 
+	const SNAP = '_staffwarden_coupon';
+
 	/**
 	 * Product values before a save, by product ID.
 	 *
@@ -111,7 +113,9 @@ class StaffWarden_Features {
 	 *
 	 * @return void
 	 */
-	public static function activate() {}
+	public static function activate() {
+		self::snapshot_coupons();
+	}
 
 	/* ------------------------------------------------------------------
 	 * Hooks
@@ -127,7 +131,8 @@ class StaffWarden_Features {
 		add_action( 'woocommerce_after_product_object_save', array( __CLASS__, 'product_after' ), 50 );
 		add_action( 'woocommerce_order_status_changed', array( __CLASS__, 'order_status' ), 50, 4 );
 		add_action( 'woocommerce_order_refunded', array( __CLASS__, 'refunded' ), 50, 2 );
-		add_action( 'woocommerce_before_coupon_object_save', array( __CLASS__, 'coupon_save' ), 50 );
+		add_action( 'woocommerce_new_coupon', array( __CLASS__, 'coupon_new' ), 50, 2 );
+		add_action( 'woocommerce_update_coupon', array( __CLASS__, 'coupon_update' ), 50, 2 );
 		add_action( 'updated_option', array( __CLASS__, 'option_changed' ), 50, 3 );
 		add_action( 'set_user_role', array( __CLASS__, 'role_changed' ), 50, 3 );
 	}
@@ -347,46 +352,94 @@ class StaffWarden_Features {
 	 * ---------------------------------------------------------------- */
 
 	/**
-	 * Coupon created or its discount changed.
+	 * Coupon values worth watching.
 	 *
+	 * @param WC_Coupon $coupon Coupon.
+	 * @return array
+	 */
+	private static function coupon_snapshot( $coupon ) {
+		$expires = $coupon->get_date_expires( 'edit' );
+		return array(
+			'amount'        => (string) $coupon->get_amount( 'edit' ),
+			'discount_type' => (string) $coupon->get_discount_type( 'edit' ),
+			'usage_limit'   => (string) $coupon->get_usage_limit( 'edit' ),
+			'date_expires'  => $expires ? $expires->date( 'Y-m-d' ) : '',
+			'free_shipping' => $coupon->get_free_shipping( 'edit' ) ? 'yes' : 'no',
+		);
+	}
+
+	/**
+	 * Remember current values of every coupon (on activation).
+	 *
+	 * @return void
+	 */
+	public static function snapshot_coupons() {
+		$ids = get_posts(
+			array(
+				'post_type'      => 'shop_coupon',
+				'post_status'    => 'any',
+				'posts_per_page' => 2000,
+				'fields'         => 'ids',
+			)
+		);
+		foreach ( $ids as $id ) {
+			if ( ! get_post_meta( $id, self::SNAP, true ) ) {
+				update_post_meta( $id, self::SNAP, self::coupon_snapshot( new WC_Coupon( $id ) ) );
+			}
+		}
+	}
+
+	/**
+	 * Coupon created.
+	 *
+	 * @param int       $id     Coupon ID.
 	 * @param WC_Coupon $coupon Coupon.
 	 * @return void
 	 */
-	public static function coupon_save( $coupon ) {
+	public static function coupon_new( $id, $coupon = null ) {
+		$coupon = $coupon instanceof WC_Coupon ? $coupon : new WC_Coupon( $id );
+		update_post_meta( $id, self::SNAP, self::coupon_snapshot( $coupon ) );
 		if ( ! StaffWarden_Settings::on( 'track_coupons' ) || ! self::actor() ) {
 			return;
 		}
-		$changes = array_intersect_key( $coupon->get_changes(), array_flip( array( 'amount', 'discount_type', 'usage_limit', 'date_expires', 'free_shipping' ) ) );
-		if ( ! $coupon->get_id() ) {
-			self::log(
-				'coupon',
-				array(
-					'field'  => 'created',
-					'new'    => $coupon->get_amount() . ( 'percent' === $coupon->get_discount_type() ? '%' : '' ),
-					'detail' => strtoupper( $coupon->get_code() ),
-				)
-			);
+		self::log(
+			'coupon',
+			array(
+				'object_id' => $id,
+				'field'     => 'created',
+				'new'       => $coupon->get_amount() . ( 'percent' === $coupon->get_discount_type() ? '%' : '' ),
+				'detail'    => strtoupper( $coupon->get_code() ),
+			)
+		);
+	}
+
+	/**
+	 * Coupon updated: compare with the last known values.
+	 *
+	 * @param int       $id     Coupon ID.
+	 * @param WC_Coupon $coupon Coupon.
+	 * @return void
+	 */
+	public static function coupon_update( $id, $coupon = null ) {
+		$coupon = $coupon instanceof WC_Coupon ? $coupon : new WC_Coupon( $id );
+		$now    = self::coupon_snapshot( $coupon );
+		$before = get_post_meta( $id, self::SNAP, true );
+		update_post_meta( $id, self::SNAP, $now );
+		if ( ! is_array( $before ) || ! StaffWarden_Settings::on( 'track_coupons' ) || ! self::actor() ) {
 			return;
 		}
-		if ( ! $changes ) {
-			return;
-		}
-		$stored = new WC_Coupon( $coupon->get_id() );
-		foreach ( $changes as $prop => $new ) {
-			$getter = 'get_' . $prop;
-			$old    = is_callable( array( $stored, $getter ) ) ? $stored->{$getter}( 'edit' ) : '';
-			$old    = $old instanceof WC_DateTime ? $old->date( 'Y-m-d' ) : $old;
-			$new    = $new instanceof WC_DateTime ? $new->date( 'Y-m-d' ) : $new;
-			if ( (string) $old === (string) $new ) {
+		foreach ( $now as $prop => $new ) {
+			$old = isset( $before[ $prop ] ) ? (string) $before[ $prop ] : '';
+			if ( $old === $new ) {
 				continue;
 			}
 			self::log(
 				'coupon',
 				array(
-					'object_id' => $coupon->get_id(),
+					'object_id' => $id,
 					'field'     => $prop,
-					'old'       => is_bool( $old ) ? ( $old ? 'yes' : 'no' ) : (string) $old,
-					'new'       => is_bool( $new ) ? ( $new ? 'yes' : 'no' ) : (string) $new,
+					'old'       => $old,
+					'new'       => $new,
 					'detail'    => strtoupper( $coupon->get_code() ),
 				)
 			);
@@ -576,7 +629,15 @@ class StaffWarden_Features {
 				if ( 'created' === $row['field'] ) {
 					return __( 'Coupon created', 'staffwarden' ) . ': ' . $row['new_value'];
 				}
-				return $row['field'] . ': ' . ( '' !== $row['old_value'] ? $row['old_value'] : '–' ) . ' > ' . ( '' !== $row['new_value'] ? $row['new_value'] : '–' );
+				$labels = array(
+					'amount'        => __( 'Discount', 'staffwarden' ),
+					'discount_type' => __( 'Discount type', 'staffwarden' ),
+					'usage_limit'   => __( 'Usage limit', 'staffwarden' ),
+					'date_expires'  => __( 'Expiry date', 'staffwarden' ),
+					'free_shipping' => __( 'Free shipping', 'staffwarden' ),
+				);
+				$what   = isset( $labels[ $row['field'] ] ) ? $labels[ $row['field'] ] : $row['field'];
+				return $what . ': ' . ( '' !== $row['old_value'] ? $row['old_value'] : '–' ) . ' > ' . ( '' !== $row['new_value'] ? $row['new_value'] : '–' );
 			case 'role':
 				return __( 'Role', 'staffwarden' ) . ': ' . ( '' !== $row['old_value'] ? $row['old_value'] : '–' ) . ' > ' . $row['new_value'];
 			default:
