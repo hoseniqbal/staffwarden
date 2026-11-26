@@ -106,7 +106,9 @@ class StaffWarden_Features {
 	 *
 	 * @return void
 	 */
-	public static function install() {}
+	public static function install() {
+		self::snapshot_coupons();
+	}
 
 	/**
 	 * Activation.
@@ -362,7 +364,7 @@ class StaffWarden_Features {
 		return array(
 			'amount'        => (string) $coupon->get_amount( 'edit' ),
 			'discount_type' => (string) $coupon->get_discount_type( 'edit' ),
-			'usage_limit'   => (string) $coupon->get_usage_limit( 'edit' ),
+			'usage_limit'   => $coupon->get_usage_limit( 'edit' ) ? (string) $coupon->get_usage_limit( 'edit' ) : '',
 			'date_expires'  => $expires ? $expires->date( 'Y-m-d' ) : '',
 			'free_shipping' => $coupon->get_free_shipping( 'edit' ) ? 'yes' : 'no',
 		);
